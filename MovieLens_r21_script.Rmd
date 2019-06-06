@@ -1,0 +1,304 @@
+```{r}
+
+#Note: This script will take a while to run. About 5 minutes on a system with the below specs:
+      #CPU: Intel(R) Core(TM) i5-7300U CPU @ 2.60GHz, 2712 Mhz, 2 Core(s), 4 Logical Processor(s)
+      #RAM: 8.00 GB
+#The script is fairly no-frills. Many inspectable objects will be created, but the only console output will be the final RMSE score.
+#For more detail, please see the associated .Rmd file which has step-by-step detail.
+
+
+#Installing Packages
+
+# List of packages for session
+.packages = c("tidyverse",       #tidy alvvays and forever!
+              "lubridate",       #date math!
+              "reshape2",        #acast to create matrix
+              "splitstackshape"  #explode pipe-delimited data to one-hot encoded dummy variables
+             
+              )
+
+# Install CRAN packages (if not already installed)
+.inst <- .packages %in% installed.packages()
+if(length(.packages[!.inst]) > 0) install.packages(.packages[!.inst])
+
+# Load packages into session 
+lapply(.packages, require, character.only=TRUE)
+
+
+#Define RMSE function
+RMSE <- function(true_ratings, predicted_ratings){
+        sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+
+
+
+# Import Data
+
+set.seed(1)
+
+edx <- readRDS("edx.rds", refhook = NULL)
+validation <- readRDS("validation.rds", refhook = NULL)
+
+overall_mean <- mean(edx$rating)
+
+
+# Feature Engineering
+
+
+
+#Split genres into a dummy variable and one-hot encode them
+#edxClean <- cSplit_e(edx, "genres", "|", type="character", fill = 0, drop = TRUE)
+
+edxClean <- edx
+
+#Now do the rest 
+edxClean <- edxClean %>% 
+  mutate(
+         userId  = factor(userId),                                     #Factorize the user ID, 
+         movieId = factor(movieId),                                    #...   movie ID,
+         #rating = factor(rating),                                      #...   rating,
+         #genres = factor(genres),                                      #...   and genres,
+         
+         reviewdate = floor_date(as_datetime(timestamp), "day"),       #Convert timestamp to a useful date,     
+         temp = str_extract(title, regex(   "\\((\\d{4})\\)"   )),     #extract the year of release in brackets
+         release_yr = str_extract(temp, regex(   "(\\d{4})"   )),      #remove the brackets and...
+         release_yr = as.numeric(release_yr),                      #...convert to a number
+         
+         #movie_age = 2019 - as.numeric(release_yr),            #calculate movie age
+         review_dly =                                                  #and time between release and review
+           as.numeric(year(reviewdate)) - as.numeric(release_yr),    
+         
+         #now factorize the new columns
+         #release_yr = factor(release_yr),                                      
+         #movie_age = factor(movie_age),                                     
+         #review_dly = factor(review_dly)                              
+
+         ) %>%                    #now remove the useless columns
+         select(-timestamp, 
+                -temp, 
+                -reviewdate, 
+                -title,
+                -genres
+                #-"genres_(no genres listed)")  #movies with no genre  
+                )
+
+
+
+
+
+
+#...and do the same for the validation set:
+
+#Split genres into a dummy variable and one-hot encode them
+#validationClean <- cSplit_e(validation, "genres", "|", type="character", fill = 0, drop = TRUE)
+#Now do the rest 
+validationClean <- validation
+
+validationClean <- validationClean %>% 
+  mutate(
+    
+         #since train and test weren't factored before splitting, we have to use the same levesl from the 
+         #training set to define the test set. (Since the test set doesn't have all movies and userIds)
+    
+         userId  = factor(userId, levels = levels(edxClean$userId)),   #Factor user ID using levels in train, 
+         movieId = factor(movieId, levels = levels(edxClean$movieId)), #...   movie ID,
+         
+         #Factorize the other columns
+         #rating = factor(rating),                                      #...   rating,
+         #genres = factor(genres),                                      #...   and genres,
+         
+
+
+         
+         
+         reviewdate = floor_date(as_datetime(timestamp), "day"),       #Convert timestamp to a useful date,     
+         temp = str_extract(title, regex(   "\\((\\d{4})\\)"   )),     #extract the year of release in brackets
+         release_yr = str_extract(temp, regex(   "(\\d{4})"   )),      #remove the brackets and...
+         release_yr = as.numeric(release_yr),                      #...convert to a number
+         
+         #movie_age = 2019 - as.numeric(release_yr),            #calculate movie age
+         review_dly =                                          #and time between release and review
+           as.numeric(year(reviewdate)) - as.numeric(release_yr),    
+         
+         #now factorize the new columns
+         #release_yr = factor(release_yr),                                      
+         #movie_age = factor(movie_age),                                     
+         #review_dly = factor(review_dly)                              
+
+         ) %>%
+         select(-timestamp, 
+                -temp, 
+                -reviewdate, 
+                -title,
+                -genres
+                #-"genres_(no genres listed)")  #movies with no genre  
+                )
+
+
+
+
+# Bias Terms + Effects
+
+
+#Movie Effect - determine bias for each movie (mean rating of a movie compared to overall mean) 
+movie_avgs <- edxClean %>% 
+     group_by(movieId) %>% 
+     select(-everything(), movieId, rating) %>%
+     summarise(moviemean =    mean( as.numeric(rating) ),
+               moviebias =    moviemean - overall_mean 
+               ) %>%
+     mutate(movieId = factor(movieId)) %>%
+     select(-moviemean)
+
+#Add moviebias column to edx
+edxClean_bias <- edxClean  %>% left_join(movie_avgs, by='movieId')
+
+
+#User Effect - determine bias for each user (mean rating of a user compared to overall mean) 
+user_avgs <- edxClean %>% 
+     group_by(userId) %>% 
+     select(-everything(), userId, rating) %>%
+     summarise(usermean =    mean( as.numeric(rating) ),
+               userbias =    usermean - overall_mean 
+               ) %>%
+     mutate(userId = factor(userId)) %>%
+     select(-usermean)
+
+
+#Add userbias column to edx
+edxClean_bias <- edxClean_bias  %>% left_join(user_avgs, by='userId')
+
+edxClean_bias <- edxClean_bias %>% 
+    mutate(usermoviebias = overall_mean + moviebias + userbias)
+
+
+
+#Join moviebias column to validation
+validationClean_bias <- validationClean  %>% left_join(movie_avgs, by='movieId')
+
+#Join userbias column to validation
+validationClean_bias <- validationClean_bias  %>% left_join(user_avgs, by='userId')
+
+validationClean_bias <- validationClean_bias %>% 
+    mutate(usermoviebias = overall_mean + moviebias + userbias)
+
+
+
+#In setting the movie penalty, we will try figures from 0 to 60, increasing by increments of 2.
+penalties <- seq(0, 60, 2)
+
+m_rmses <- sapply(penalties, function(p){
+
+     reg_movie_avgs <- edxClean %>% 
+          group_by(movieId) %>%
+          summarize(regmoviebias = sum(rating - overall_mean)/(n()+p))
+
+  
+     predicted_ratings <- 
+          edxClean %>% 
+          left_join(reg_movie_avgs, by = "movieId") %>%
+          left_join(user_avgs, by = "userId") %>%
+          mutate(regmoviebias = overall_mean + userbias + regmoviebias) %>%
+          .$regmoviebias
+     return(RMSE(predicted_ratings, edxClean$rating))
+})
+
+
+     
+
+
+moviepenalty_optimal <- penalties[which.min(m_rmses)]  #determine which is lowest
+
+
+
+
+    reg_movie_avgs <- edxClean %>% 
+          group_by(movieId) %>%
+          summarize(regmoviebias = sum(rating - overall_mean)/(n()+moviepenalty_optimal))
+
+#Check movie bias against test set
+     predicted_ratings <- 
+          validationClean %>% 
+          left_join(reg_movie_avgs, by = "movieId") %>%
+          left_join(user_avgs, by = "userId") %>%
+          mutate(regmoviebias = overall_mean + userbias + regmoviebias) %>%
+          .$regmoviebias
+
+
+regularized_movieeffects <- RMSE(predicted_ratings, validationClean$rating)
+
+     
+
+
+#Now let's do the same for user penalties.
+penalties <- seq(0, 5, 0.25)
+
+
+
+u_rmses <- sapply(penalties, function(p){
+
+
+     reg_user_avgs <- edxClean %>% 
+          left_join(reg_movie_avgs, by="movieId") %>%
+          group_by(userId) %>%
+          summarize(reguserbias = sum(rating - regmoviebias - overall_mean)/(n()+p))
+     
+     predicted_ratings <- 
+          edxClean %>% 
+          left_join(reg_movie_avgs, by = "movieId") %>%
+          left_join(reg_user_avgs, by = "userId") %>%
+          mutate(regusermoviebias = overall_mean + regmoviebias + reguserbias) %>%
+          .$regusermoviebias
+     return(RMSE(predicted_ratings, edxClean$rating))
+})
+
+
+     
+
+
+userpenalty_optimal <- penalties[which.min(u_rmses)]  #determine which is lowest
+
+
+
+#Let's check both penalty values against the *test* set and see how it affects our RMSE.
+
+
+
+   #build table with optimal penalty    
+    reg_user_avgs <- edxClean %>% 
+          left_join(reg_movie_avgs, by="movieId") %>%
+          group_by(userId) %>%
+          summarize(reguserbias = sum(rating - regmoviebias - overall_mean)/(n()+userpenalty_optimal))
+     
+ 
+
+
+ 
+   
+
+    reg_predicted_ratings <- 
+          validationClean %>% 
+          left_join(reg_movie_avgs, by = "movieId") %>%
+          left_join(reg_user_avgs, by = "userId") %>%
+          mutate(regusermovie = overall_mean + regmoviebias + reguserbias) %>%
+          .$regusermovie
+
+regularized_effects <- RMSE(reg_predicted_ratings, validationClean$rating)
+
+
+
+#There are a few ratings are outside of the valid range empirically present in the dataset (0-5). There aren't many, but could we get better by limiting these extreme values to the nearest valid rating?
+
+
+reg_predicted_ratings_limit <- pmax(reg_predicted_ratings,     0.5)  #values lower than 0.5 to 0.5
+reg_predicted_ratings_limit <- pmin(reg_predicted_ratings_limit, 5)  #values greater than 5 to 5
+
+
+
+
+regularized_effects_limits <- RMSE(reg_predicted_ratings_limit, validationClean$rating)
+
+#FINAL RMSE
+regularized_effects_limits
+
+```
