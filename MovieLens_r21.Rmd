@@ -1,0 +1,1108 @@
+
+---
+title: "Predicting Movie Ratings in the MovieLens 10M Dataset"
+urlcolor: orange
+output:
+  pdf_document:
+    dev: png  
+    toc: true
+    toc_depth: 2
+
+---
+
+
+```{r Install Packages, include=FALSE}
+
+
+#Note: This script will take a while to run. About 10-12 minutes on a system with the below specs:
+      #CPU: Intel(R) Core(TM) i5-7300U CPU @ 2.60GHz, 2712 Mhz, 2 Core(s), 4 Logical Processor(s)
+      #RAM: 8.00 GB
+
+
+
+
+
+
+##Installing Packages
+
+# List of packages for session
+.packages = c("tidyverse",       #tidy alvvays and forever!
+              "corrplot",        #correlation plots
+              "cowplot",         #solve x-axis misalignment when plotting, and better-looking defaults for ggplots
+              "gridExtra",       #combine plots
+              "knitr",           #report output
+              "kableExtra",      #nice tables
+              "lubridate",       #date math!
+              "reshape2",        #acast to create matrix
+              "scales",          #get rid of scientific notation in charts
+              "splitstackshape"  #explode pipe-delimited data to one-hot encoded dummy variables
+             
+              )
+
+# Install CRAN packages (if not already installed)
+.inst <- .packages %in% installed.packages()
+if(length(.packages[!.inst]) > 0) install.packages(.packages[!.inst])
+
+# Load packages into session 
+lapply(.packages, require, character.only=TRUE)
+
+
+```
+
+```{r Functions and Hooks, include=FALSE}
+# Customize knitr output
+
+#Set Thousands Separator for inline output
+knitr::knit_hooks$set(inline = function(x) { if(!is.numeric(x)){ x }else{ prettyNum(round(x,2), big.mark=",") } })
+
+#we've already set the graphic device to "png" in the RMD options. the default device for pdfs draws every point of a scatterplot, creatinvg *very* big files.
+#But png is not as crisp, so we will set a higher resolution for pdf output of plots. 
+knitr::opts_chunk$set(dpi=300)
+
+#Create Kable wrapper function for thousands separator in table output, and nice formating with kableExtra
+niceKable = function(...) {
+  knitr::kable(..., format.args = list(decimal.mark = '.', big.mark = ",")) %>% kable_styling()
+}
+
+RMSE <- function(true_ratings, predicted_ratings){
+        sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+
+```
+
+
+# Introduction
+
+The *"MovieLens 10M Dataset"* is a stable benchmark dataset provided by the GroupLens research lab in the Department of Computer Science and Engineering at the University of Minnesota, Twin Cities.  The GroupLens lab specializes in recommender systems, online communities, mobile and ubiquitous technologies, digital libraries, and local geographic information systems.
+
+Users were selected randomly for inclusion in the *10M* dataset, with ratings taken from the full set of MovieLens data. All users selected had rated at least 20 movies. No user demographic information is included - each user is represented by an id, and no other information is provided.
+
+The goal of this project will be to predict ratings for unseen data. The dataset will be divided into a 90/10 split of training and test datasets. A model will be built from the training data, and then applied to the unseen test data. The success metric will be root mean square estimate (RMSE).  We are attempting to predict movie ratings on a scale of 0.5 stars to 5 stars, and RMSE will be measured on the same scale. An RMSE of 0 means we are always correct, which is unlikely. An RMSE of 1 means the predicted ratings are off by 1 star.
+
+The goal for this project is to achieve $RMSE < 0.87750$ as computed on the unseen test dataset.
+
+This project is being completed for *Data Science: Capstone* (PH125.9x) course in the HarvardX Professional Certificate Data Science Program.  The methods used will be those methods taught in the program. Computationally expensive methods will be avoided.
+
+# Methods/Analysis
+
+## Setting the Data
+
+First the data is imported and partitioned. Normally, the code below would be used.
+
+```{r Set Data example, eval=FALSE, echo=TRUE, cache=TRUE}
+
+# ############################################################
+# Create edx set, validation set, and submission file
+# ############################################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- read.table(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                      col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+
+set.seed(1)
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+
+validation <- temp %>% 
+     semi_join(edx, by = "movieId") %>%
+     semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+```
+
+\newpage
+
+As this RMD was created in *R version 3.6.0 (2019-04-26)*, the data will instead be imported per the course instructions for this version of R, from two pre-created files, downloaded  from a [Google Drive Folder](https://drive.google.com/drive/folders/1IZcBBX0OmL9wu9AdzMBFUG8GoPbGQ38D). 
+
+The two files are then placed in the same local folder as the .RMD file and imported as below.
+
+```{r Set Data real, echo=TRUE, eval=TRUE}
+#Load the Data
+
+set.seed(1)
+
+edx <- readRDS("edx.rds", refhook = NULL)
+validation <- readRDS("validation.rds", refhook = NULL)
+
+
+```
+
+## Exploratory Data Analysis
+
+### Dataset Dimenions
+```{r eval=FALSE, include=FALSE}
+#Check Dimensions of both test and train tables
+dim(edx)
+dim(validation)
+```
+
+Our training set is 'edx' and our test set is 'validation'. Together, there are `r nrow(validation)+nrow(edx)` records.
+
+```{r echo=FALSE}
+
+
+tribble(
+  ~"Dataset",     ~"Number of Rows",    ~"Number of Columns",
+  #--             |--                   |----
+  "edx",          nrow(edx),            ncol(edx),
+  "validation",   nrow(validation),     ncol(validation)
+) %>% niceKable
+
+```
+
+
+There are no missing values in any column.
+
+```{r}
+sapply(edx, {function(x) any(is.na(x))}) %>% niceKable
+
+```
+
+A preview of the data structure is shown below from the first few rows in 'edx'.
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+head(edx)  %>% kable %>% kable_styling()
+```
+*Rating* is the dependent/target variable - the value we are tring to predict.
+
+\newpage
+
+### Data Classes
+
+We can see that `userId`, `movieId` and `rating` are not factors, despite each having a smaller number of unique values. Furthermore, `timestamp` (the timestamp of the rating) is not useful as an integer.
+
+```{r echo=FALSE}
+sapply(edx, class) %>% niceKable
+
+```
+
+
+### Genres
+
+```{r cache=TRUE, include=FALSE}
+genrecount <- edx %>%
+  separate_rows(genres, sep = "\\|") %>%
+  group_by(genres) %>%
+  summarise(number = n()) %>%
+  arrange(desc(number))
+  
+
+```
+
+While there are only `r nrow(genrecount)` unique genres, a film may be classified into multiple genres, up to seven at once. There are `r n_distinct(edx$genres)` of these unique combinations. Here are some of the biggest combinations.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+
+edx %>%
+
+  distinct(genres) %>%
+  # mutate(genrelength = nchar(genres) ) %>%                         #Character length, pretty crude
+  mutate(genreCount = str_count(genres, '\\|')              ) %>%    #Number of pipes = # of genres, much better
+  arrange(desc(genreCount)) %>%
+  top_n(2) %>% 
+  niceKable
+  
+```
+
+
+### Best-Rated Genres
+
+Which genre combinations have the best average ratings? We'll look only at the top 10 genres from all genres that have over **10,0000** ratings. Each genre will have an error bar with the standard error of the rating.
+
+\newpage
+
+```{r fig.height=7, echo=FALSE}
+
+top10genres <- edx %>%
+  group_by(genres) %>%
+  summarize(  n = n(), 				sd = sd(rating) ,		se  = sd/sqrt(n) , 		avg = mean(rating) 				) %>%
+  filter(n > 10000) %>%
+  top_n(10, avg) %>%
+	mutate(genres = reorder(genres, avg))
+
+top10plot <- top10genres %>% ggplot (aes(x=genres, y=avg)) +
+    geom_point() +
+    geom_errorbar(aes(ymin=avg-se, ymax=avg+se), width=0.4, colour="red", alpha=0.4, size=1.3) +
+    theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
+    ggtitle("Top Genres > 10,000 Ratings") +
+    ylim(3.5, 4.3)
+
+
+top100genres <- edx %>%
+  group_by(genres) %>%
+  summarize(  n = n(), 				sd = sd(rating) ,		se  = sd/sqrt(n) , 		avg = mean(rating) 				) %>%
+  filter(n > 100000) %>%
+  top_n(10, avg) %>%
+	mutate(genres = reorder(genres, avg))
+
+top100plot <- top100genres %>% ggplot (aes(x=genres, y=avg)) +
+    geom_point() +
+    geom_errorbar(aes(ymin=avg-se, ymax=avg+se), width=0.4, colour="red", alpha=0.4, size=1.3) +
+    theme(axis.text.x = element_text(angle = 60, hjust = 1))+
+    ggtitle("Top Genres > 100,000 Ratings") +
+    ylim(3.4, 4.3)
+
+
+#align x-axes of both plots.
+topplots <- align_plots(top10plot, top100plot, align = "hv")
+
+grid.arrange(topplots[[1]], topplots[[2]], nrow = 1)
+
+
+```
+
+When we increase the sample set to films with over **100,000** reviews, the error bars shrink slightly and the average rating decreases. This suggests that as the number of ratings increase, reviews regress towards the global mean, as well as towards a mean for a particular film.
+
+\newpage
+
+### Genre prevalence
+We may later decide to split these genre combinations up for better predictive value. Let's look at the individual prevalence of ratings each genre.
+
+```{r echo=FALSE}
+
+genrecount %>% ggplot ( aes(reorder(genres, number), number) ) +
+  geom_bar(stat = "identity", fill="steelblue") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(labels = comma)
+
+```
+
+```{r eval=FALSE, include=FALSE}
+
+# DEPRECATED IN FAVOR OF CHUNK ABOVE. DELETE FOR FINAL REPORT
+
+edx %>%
+  summarize(
+    Drama =  nrow ( filter(., str_detect(genres,"Drama") ) ), 
+    Comedy =  nrow ( filter(., str_detect(genres,"Comedy") ) ), 
+    Thriller =  nrow ( filter(., str_detect(genres,"Thriller") ) ), 
+    Romance =  nrow ( filter(., str_detect(genres,"Romance") ) ), 
+  ) %>% niceKable
+```
+
+
+
+### Unique Entries
+
+For every unique film, there are about 6.5X as many unique users. The average user rates ~128 films.
+
+```{r echo=FALSE}
+
+
+
+
+edx %>% summarize(Unique_titles = n_distinct(movieId), Unique_users = n_distinct(userId), Avg_Num_Ratings = nrow(edx) / n_distinct(userId)) %>% niceKable
+
+```
+
+
+\newpage
+
+### Matrix of User Ratings by Movies
+
+```{r include=FALSE}
+s <- 2000 #how many random movies and users for sparseness chart?
+```
+
+To really highlight the sparseness of this data, we will visualize a larger matrix for `r s` random movies and an equal number of users:
+
+```{r echo=FALSE}
+
+users <- sample(unique(edx$userId), s)
+edx %>% filter(userId %in% users) %>% 
+select(userId, movieId, rating) %>%
+mutate(rating = 1) %>%
+spread(movieId, rating) %>% select(sample(ncol(.), s)) %>% 
+as.matrix() %>% t(.) %>%
+image(1:s, 1:s,. , xlab="Movies", ylab="Users")
+
+
+```
+
+As expected, we can see some users are prolific, rating many movies. Likewise, some movies are very commonly rated.
+
+### Reviews 
+
+Which films have the most ratings?
+
+```{r Rating Frequency, echo=FALSE, message=FALSE, warning=FALSE}
+
+edx %>% group_by(title) %>% summarise(n = n()) %>% arrange(desc(n)) %>% top_n(5) %>% niceKable
+
+```
+
+
+\newpage
+
+### Rating Frequency
+
+
+Half-star ratings are given out less frequently than full-stars. 4-star and 3-star ratings are the most common, followed by 5-star ratings.  
+
+```{r fig.height=3, echo=FALSE}
+edx %>%
+  group_by(rating) %>%
+  summarize(count = n(), probability = count/nrow(edx)) %>%
+  ggplot(aes(rating, count)) +
+  geom_bar(stat = "identity", fill="steelblue") +
+  geom_text(aes(label=count), vjust="top", color="white", size=3.5) + #add counts to bars themselves...
+  theme_minimal() +
+  theme(axis.title.y=element_blank(),                                 #.,. and hide y-axis labels
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+
+```
+
+\newpage
+
+Part of the reason for fewer half-star ratings is likely that half-stars weren't used in the *Movielens* rating system prior to 2003.  Here are the distributions of the ratings before and after half stars were introduced.
+
+```{r fig.height=2, echo=FALSE}
+
+before <- edx %>%
+  group_by(rating) %>%
+  mutate(reviewdate = year(floor_date(as_datetime(timestamp), "day")) )   %>%  
+  filter(reviewdate < 2003) %>%
+  summarize(count = n()) %>%
+  
+  ggplot(aes(rating, count)) +
+  ggtitle("Ratings from before 2003") +
+  geom_bar(stat = "identity", fill="steelblue") +
+  theme_minimal() +
+  theme(axis.title.y=element_blank(),                                 #.,. and hide y-axis labels
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+
+
+after <- edx %>%
+  group_by(rating) %>%
+  mutate(reviewdate = year(floor_date(as_datetime(timestamp), "day")) )   %>%  
+  filter(reviewdate >= 2003) %>%
+  summarize(count = n()) %>%
+  
+  ggplot(aes(rating, count)) +
+  ggtitle("Ratings from 2003 and later") +
+  geom_bar(stat = "identity", fill="steelblue") +
+  theme_minimal() +
+  theme(axis.title.y=element_blank(),                                 #.,. and hide y-axis labels
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+
+
+
+grid.arrange(before, after, nrow = 1)
+```
+
+Clearly the lack of half-star ratings is because the Movielens maintainers have combined two unevenly-sized distributions into one.
+
+
+```{r include=FALSE}
+overall_mean <- mean(edx$rating)
+
+```
+
+
+### Average Rating By Year of Release 
+
+
+Earlier films have broader variability in their ratings, and films over 30 years old tend to be rated more highly on average. (The *Golden Age of Hollywood* is commonly held to have spanned from the late 1920s to the early 1960s).
+
+```{r echo=FALSE}
+index <- sample(1:nrow(edx), 200000)
+age <- edx[index, ]
+
+
+age <- edx %>% 
+  mutate(
+         temp = str_extract(title, regex(   "\\((\\d{4})\\)"   )),   #extract the year of release in brackets
+         release_yr = str_extract(temp, regex(   "(\\d{4})"   )),     #remove the brackets and...
+         release_yr = as.numeric(release_yr)                          #...convert to a number
+          ) %>%
+  select(-everything(), rating, release_yr)
+
+age %>%
+  group_by(release_yr) %>%
+  summarize(  n = n(), 				sd = sd(rating) ,		se  = sd/sqrt(n) , 		avg = mean(rating) 				) %>%
+
+  
+    ggplot (aes(x=release_yr, y=avg)) +
+    geom_point() +
+    geom_errorbar(aes(ymin=avg-se, ymax=avg+se), width=0.4, colour="red", alpha=0.8, size=1.3) +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1)) +
+    geom_hline(yintercept = overall_mean)
+  
+  
+   # geom_bar(aes(x=release_yr, y=n), stat = "identity")
+    #geom_smooth()
+
+
+
+
+```
+
+*Note: The chart above features standard error bars, and includes a reference line for the overall mean of all ratings*
+
+
+More modern films have a tighter variability, and are generally located closer to the overall mean of `r overall_mean`.
+
+This is almost certainly due to the fact that older films have fewer ratings, and modern films have many more. 
+```{r fig.height=3, echo=FALSE}
+
+age %>%
+  group_by(release_yr) %>%
+  summarize(  ratings = n()	) %>%
+  ggplot ( aes(release_yr, ratings) ) +
+  geom_bar(stat = "identity", fill="steelblue") +
+  scale_y_continuous(labels = comma) +
+  theme_minimal()
+
+```
+
+MovieLens ratings weren't collected until the mid-1990s, so any ratings for films released earlier than that time period will have some degree of selection and recency bias.
+
+### Summary Statistics
+
+Considering the distributions seen above, the below summary statistics are therfore unsurprising. Half the data falls within 3 stars and 4 stars. The 50th percentile (median) is the same as the 75th percentile, and about 0.5 stars higher than the mean, confirming our skewed distribution.
+
+
+```{r echo=FALSE}
+
+#summary(edx$rating)  # Gives us some nice summary statistics but isn't pipable so we'll do it manually
+
+
+edx %>%
+summarize(
+  First_Quart = quantile(rating,0.25), 
+  Mean_Rating = mean(rating) , 
+  Median_Rating = median(rating), 
+  Third_Quart = quantile(rating,0.75)
+  )  %>% niceKable
+
+```
+
+# Results
+
+## Naive Prediction
+
+
+We will make our first prediction, by simply using the mean of all ratings (`r overall_mean`) as the estimate for every unknown rating. This will be the baseline against which model improvements will be evaluated.
+
+```{r echo=FALSE}
+
+naive_rmse <- RMSE(validation$rating, overall_mean)
+
+rmse_results <- tibble(Method = "Mean Rating (Naive)", RMSE = naive_rmse) 
+rmse_results %>% niceKable
+
+```
+
+
+
+## Feature Engineering
+
+Based on our first result, we will try to enhance the utility of the columns we have. It would be nice to split out genres into unique columns with a boolean 0/1 or TRUE/FALSE if a film exists in that genre (i.e *one-hot encoding*). This would help transform `genres` from a categorical variable to one that we can use for principal component analysis. (More on that in the Conclusion section.) 
+
+For now we will remove `genres` altogether. Then we will factorize userId and movieId, extract the movie's year of release from the title as `release_yr`, and calculate the number of years between a movie's release and a user's review as `review_dly`.
+
+```{r echo=FALSE}
+
+#Split genres into a dummy variable and one-hot encode them
+#edxClean <- cSplit_e(edx, "genres", "|", type="character", fill = 0, drop = TRUE)
+
+edxClean <- edx
+
+#Now do the rest 
+edxClean <- edxClean %>% 
+  mutate(
+         userId  = factor(userId),                                     #Factorize the user ID, 
+         movieId = factor(movieId),                                    #...   movie ID,
+         #rating = factor(rating),                                      #...   rating,
+         #genres = factor(genres),                                      #...   and genres,
+         
+         reviewdate = floor_date(as_datetime(timestamp), "day"),       #Convert timestamp to a useful date,     
+         temp = str_extract(title, regex(   "\\((\\d{4})\\)"   )),     #extract the year of release in brackets
+         release_yr = str_extract(temp, regex(   "(\\d{4})"   )),      #remove the brackets and...
+         release_yr = as.numeric(release_yr),                      #...convert to a number
+         
+         #movie_age = 2019 - as.numeric(release_yr),            #calculate movie age
+         review_dly =                                                  #and time between release and review
+           as.numeric(year(reviewdate)) - as.numeric(release_yr),    
+         
+         #now factorize the new columns
+         #release_yr = factor(release_yr),                                      
+         #movie_age = factor(movie_age),                                     
+         #review_dly = factor(review_dly)                              
+
+         ) %>%                    #now remove the useless columns
+         select(-timestamp, 
+                -temp, 
+                -reviewdate, 
+                -title,
+                -genres
+                #-"genres_(no genres listed)")  #movies with no genre  
+                )
+
+
+
+
+
+#and check our work          
+
+head(edxClean) %>% kable %>% kable_styling()
+
+
+```
+
+```{r include=FALSE}
+#...and do the same for the validation set:
+
+#Split genres into a dummy variable and one-hot encode them
+#validationClean <- cSplit_e(validation, "genres", "|", type="character", fill = 0, drop = TRUE)
+#Now do the rest 
+validationClean <- validation
+
+validationClean <- validationClean %>% 
+  mutate(
+    
+         #since train and test weren't factored before splitting, we have to use the same levesl from the 
+         #training set to define the test set. (Since the test set doesn't have all movies and userIds)
+    
+         userId  = factor(userId, levels = levels(edxClean$userId)),   #Factor user ID using levels in train, 
+         movieId = factor(movieId, levels = levels(edxClean$movieId)), #...   movie ID,
+         
+         #Factorize the other columns
+         #rating = factor(rating),                                      #...   rating,
+         #genres = factor(genres),                                      #...   and genres,
+         
+
+
+         
+         
+         reviewdate = floor_date(as_datetime(timestamp), "day"),       #Convert timestamp to a useful date,     
+         temp = str_extract(title, regex(   "\\((\\d{4})\\)"   )),     #extract the year of release in brackets
+         release_yr = str_extract(temp, regex(   "(\\d{4})"   )),      #remove the brackets and...
+         release_yr = as.numeric(release_yr),                      #...convert to a number
+         
+         #movie_age = 2019 - as.numeric(release_yr),            #calculate movie age
+         review_dly =                                          #and time between release and review
+           as.numeric(year(reviewdate)) - as.numeric(release_yr),    
+         
+         #now factorize the new columns
+         #release_yr = factor(release_yr),                                      
+         #movie_age = factor(movie_age),                                     
+         #review_dly = factor(review_dly)                              
+
+         ) %>%
+         select(-timestamp, 
+                -temp, 
+                -reviewdate, 
+                -title,
+                -genres
+                #-"genres_(no genres listed)")  #movies with no genre  
+                )
+
+
+
+
+
+#and check our work         
+
+
+head(validationClean) %>% kable %>%kable_styling()
+
+
+
+```
+
+```{r include=FALSE}
+#Check work
+names(edxClean)
+names(validationClean)
+
+```
+
+
+
+## Bias Terms + Effects
+
+```{r include=FALSE}
+
+#Movie Effect - determine bias for each movie (mean rating of a movie compared to overall mean) 
+movie_avgs <- edxClean %>% 
+     group_by(movieId) %>% 
+     select(-everything(), movieId, rating) %>%
+     summarise(moviemean =    mean( as.numeric(rating) ),
+               moviebias =    moviemean - overall_mean 
+               ) %>%
+     mutate(movieId = factor(movieId)) %>%
+     select(-moviemean)
+
+#Add moviebias column to edx
+edxClean_bias <- edxClean  %>% left_join(movie_avgs, by='movieId')
+
+
+#User Effect - determine bias for each user (mean rating of a user compared to overall mean) 
+user_avgs <- edxClean %>% 
+     group_by(userId) %>% 
+     select(-everything(), userId, rating) %>%
+     summarise(usermean =    mean( as.numeric(rating) ),
+               userbias =    usermean - overall_mean 
+               ) %>%
+     mutate(userId = factor(userId)) %>%
+     select(-usermean)
+
+
+#Add userbias column to edx
+edxClean_bias <- edxClean_bias  %>% left_join(user_avgs, by='userId')
+
+edxClean_bias <- edxClean_bias %>% 
+    mutate(usermoviebias = overall_mean + moviebias + userbias)
+
+
+```
+
+
+```{r include=FALSE}
+
+#Join moviebias column to validation
+validationClean_bias <- validationClean  %>% left_join(movie_avgs, by='movieId')
+
+#Join userbias column to validation
+validationClean_bias <- validationClean_bias  %>% left_join(user_avgs, by='userId')
+
+validationClean_bias <- validationClean_bias %>% 
+    mutate(usermoviebias = overall_mean + moviebias + userbias)
+
+
+```
+
+
+## Predict ratings based on movie effect
+
+A bias term will be calculated for each movie to determine how much better/worse a given film is from the overall average, based on the average of all ratings for that film only. We will subtract the $overallMean$ ('r overall_mean ') from the $movieMean$ for each film to determine the bias term, as below:
+
+$$Bias_{movie} = Mean_{movie}  - Mean_{overall} $$
+More positively rated films will have a positive bias value, while negatively rated films will have a neagative bias value. Does this improve the model?
+
+```{r echo=FALSE}
+
+#Predict ratings based on movie effect
+predicted_ratings <- overall_mean + validationClean %>% 
+     left_join(movie_avgs, by='movieId') %>%
+     .$moviebias
+
+#calculate RMSE for movie effects model
+
+pred_me <-RMSE(validationClean$rating, predicted_ratings)
+
+rmse_results <- bind_rows(rmse_results,
+                          tibble(Method="Movie Effect Model",
+                                     RMSE = pred_me ))
+rmse_results %>% niceKable()
+```
+
+When tested against unseen data, it's an improvement over the naive prediction.
+
+## Predict ratings based on user + movie effect
+
+It is understood that users may have a tendency to rate movies higher or lower than the overall mean. Let's add this into the model. First we'll calculate the bias for each user:
+
+$$Bias_{user} = Mean_{user} - Mean_{overall}$$
+Then we'll combine the bias of a user, with the bias of a film and add both to the overall mean (`r overall_mean`) for a combined bias rating for each unique combination of a user rating for a given film.
+
+$UserMovie Bias = overallMean + movieBias + userBias$
+
+```{r echo=FALSE}
+
+head(edxClean_bias) %>% kable %>% kable_styling()
+
+```
+
+Let's check this against the test set of data.
+```{r echo=FALSE}
+
+#Predict ratings based on user + movie effect
+predicted_ratings_both <- validationClean %>% 
+     left_join(movie_avgs, by='movieId') %>%
+     left_join(user_avgs, by='userId') %>%
+     mutate(usermoviebias = overall_mean + moviebias + userbias) %>%
+     .$usermoviebias
+
+#could end up higher than 5 and lower than zero we'll fix this soon
+
+
+#%>%
+ #    .$usermoviebias
+
+#calculate RMSE for movie effects model
+
+pred_usermovie <-RMSE(validationClean$rating, predicted_ratings_both)
+
+rmse_results <- bind_rows(rmse_results,
+                          tibble(Method="User + Movie Effect Model",
+                                     RMSE = pred_usermovie ))
+rmse_results %>% niceKable()
+```
+
+It's another improvement.
+
+\newpage
+
+### Correlation Plot
+
+The improvement makes sense as we can see that our bias figures are closely and positively related with rating. The combibed user + movie bias term is most the value most positively correlated with rating.
+
+```{r echo=FALSE}
+
+
+corr <- edxClean_bias %>% select(-movieId, -userId, -release_yr)
+index <- sample(1:nrow(corr), 100000)
+corr <- corr[index, ]
+
+corrplot(cor(corr), method = "square", type="upper")
+```
+
+## Regularization
+
+We know that films with very few ratings may be overinflated or underinflated. Their relative obscurity will cause very few ratings to determine the size of the movie effect. Likewise for users. Let's penalize films and users with very few ratings, by holding them closer to the $overallMean$ until the sample size $n$ (the number of ratings by a specific user, or for a specific movie) increases. 
+
+$$Bias_{user} = \frac {\sum ( Mean_{ratings by user} - Mean_{overall})}    {n_{ratings by user} + Penalty_{user}}$$
+
+To do so, we will cross-validate a penalty figure within the *training* dataset. We will avoid cross-validating against the test set, as that would be cheating!
+
+In setting the penalty, we will try figures from 0 to 60, increasing by increments of 2.
+
+```{r}
+penalties <- seq(0, 60, 2)
+```
+
+
+```{r find movie penalty, echo=FALSE}
+
+
+m_rmses <- sapply(penalties, function(p){
+
+     reg_movie_avgs <- edxClean %>% 
+          group_by(movieId) %>%
+          summarize(regmoviebias = sum(rating - overall_mean)/(n()+p))
+
+  
+     predicted_ratings <- 
+          edxClean %>% 
+          left_join(reg_movie_avgs, by = "movieId") %>%
+          left_join(user_avgs, by = "userId") %>%
+          mutate(regmoviebias = overall_mean + userbias + regmoviebias) %>%
+          .$regmoviebias
+     return(RMSE(predicted_ratings, edxClean$rating))
+})
+
+
+     
+qplot(penalties, m_rmses)    #plot the penalties
+
+moviepenalty_optimal <- penalties[which.min(m_rmses)]  #determine which is lowest
+
+
+```
+
+The optimum value for our $Bias_{movie}$ figure is `r moviepenalty_optimal`. How does the model improve when checked against the test set?
+
+```{r echo=FALSE}
+
+    reg_movie_avgs <- edxClean %>% 
+          group_by(movieId) %>%
+          summarize(regmoviebias = sum(rating - overall_mean)/(n()+moviepenalty_optimal))
+
+  
+     predicted_ratings <- 
+          validationClean %>% 
+          left_join(reg_movie_avgs, by = "movieId") %>%
+          left_join(user_avgs, by = "userId") %>%
+          mutate(regmoviebias = overall_mean + userbias + regmoviebias) %>%
+          .$regmoviebias
+
+
+regularized_movieeffects <- RMSE(predicted_ratings, validationClean$rating)
+
+rmse_results <- bind_rows(rmse_results,
+                          tibble(Method="User + Regularized Movie Effects",  
+                                     RMSE = regularized_movieeffects ))
+rmse_results %>% niceKable
+     
+
+
+```
+
+A little bit! Now let's do the same for user penalties.
+
+```{r}
+penalties <- seq(0, 5, 0.25)
+```
+
+
+```{r find user penalty, echo=FALSE}
+
+
+u_rmses <- sapply(penalties, function(p){
+
+
+     reg_user_avgs <- edxClean %>% 
+          left_join(reg_movie_avgs, by="movieId") %>%
+          group_by(userId) %>%
+          summarize(reguserbias = sum(rating - regmoviebias - overall_mean)/(n()+p))
+     
+     predicted_ratings <- 
+          edxClean %>% 
+          left_join(reg_movie_avgs, by = "movieId") %>%
+          left_join(reg_user_avgs, by = "userId") %>%
+          mutate(regusermoviebias = overall_mean + regmoviebias + reguserbias) %>%
+          .$regusermoviebias
+     return(RMSE(predicted_ratings, edxClean$rating))
+})
+
+
+     
+qplot(penalties, u_rmses)    #plot the penalties
+
+userpenalty_optimal <- penalties[which.min(u_rmses)]  #determine which is lowest
+
+
+```
+
+
+ 
+The optimum value for our $Bias_{user}$ figure is `r userpenalty_optimal`. Interesting!
+
+Let's check both values against the *test* set and see how it affects our RMSE.
+
+```{r echo=FALSE}
+
+   #build table with optimal penalty    
+    reg_user_avgs <- edxClean %>% 
+          left_join(reg_movie_avgs, by="movieId") %>%
+          group_by(userId) %>%
+          summarize(reguserbias = sum(rating - regmoviebias - overall_mean)/(n()+userpenalty_optimal))
+     
+ 
+
+
+ 
+   
+
+    reg_predicted_ratings <- 
+          validationClean %>% 
+          left_join(reg_movie_avgs, by = "movieId") %>%
+          left_join(reg_user_avgs, by = "userId") %>%
+          mutate(regusermovie = overall_mean + regmoviebias + reguserbias) %>%
+          .$regusermovie
+
+regularized_effects <- RMSE(reg_predicted_ratings, validationClean$rating)
+
+rmse_results <- bind_rows(rmse_results,
+                          tibble(Method="Regularized User + Regularized Movie Effects",  
+                                     RMSE = regularized_effects ))
+rmse_results %>% niceKable
+
+
+```
+
+Better!
+```{r echo=FALSE}
+
+
+plot_reg <- 
+          edxClean %>% 
+          group_by(movieId) %>% 
+          summarize(moviebias = sum(rating - overall_mean)/(n()+moviepenalty_optimal), n = n())        
+
+tibble(original = movie_avgs$moviebias, 
+           regularized = plot_reg$moviebias, 
+           n = plot_reg$n) %>%
+     ggplot(aes(original, regularized, size=sqrt(n))) + 
+     geom_point(shape=1, alpha=0.2) +
+     theme_minimal()
+
+
+
+```
+
+As we can see in the plot above, we're shrinking movies with fewer ratings closer to a bias of zero (that is, towards the overall mean of `r overall_mean`). 
+
+The movie effect and user effect therefore matter more if the movie/user has more ratings - as either sample size increases we become more confident that the the film truly is better/worse than the overall mean or that the user has a tendency to rate films more or less highly than the overall mean. 
+
+### Final Improvements 
+
+Since we're adding two biase terms together, we have a few predicted ratings below 0.5 and above 5.
+
+```{r echo=FALSE}
+
+
+tibble("< 0.5" = sum(reg_predicted_ratings < 0.5), " > 5" = sum(reg_predicted_ratings > 5) ) %>% niceKable
+
+
+
+
+```
+
+These are outside of the valid range empirically present in the dataset. There aren't many, but could we get better by limiting these extreme values to the nearest valid rating?
+
+
+```{r echo=FALSE}
+
+
+
+reg_predicted_ratings_limit <- pmax(reg_predicted_ratings,     0.5)  #values lower than 0.5 to 0.5
+reg_predicted_ratings_limit <- pmin(reg_predicted_ratings_limit, 5)  #values greater than 5 to 5
+
+
+
+
+regularized_effects_limits <- RMSE(reg_predicted_ratings_limit, validationClean$rating)
+
+rmse_results <- bind_rows(rmse_results,
+                          tibble(Method="Reg. User + Reg. Movie Effects (Capped)",  
+                                     RMSE = regularized_effects_limits ))
+rmse_results %>% niceKable
+
+#qplot(reg_predicted_ratings)
+#qplot(reg_predicted_ratings_limit)
+
+```
+
+A modest improvement, but we'll take it!
+
+Let's see how our final model performs against the true values present in the data.
+
+```{r pred vs true, echo=FALSE, message=FALSE, warning=FALSE}
+
+true_vs_predicted <- tibble(
+  true = validationClean$rating, 
+  pred = reg_predicted_ratings_limit)
+
+
+
+
+true_vs_predicted %>%
+  ggplot( aes( true, pred))  +
+  geom_point(alpha = 0.005) +
+  geom_smooth()+
+  geom_hline(yintercept = overall_mean, colour = "orange") +
+  geom_vline(xintercept = overall_mean, colour = "orange")
+
+
+```
+
+Our true values exist only in half-steps, while our predicted values are continuous. Therefore our scatterplot has gaps. We wouldn't want to round our predictions to the nearest half-step, however, as this would limit our ability to rank-order our recommendations. (A user will likely prefer film with a 3.74 rating over one with a 3.26 rating, but both would round to 3.5 stars)
+
+Based on the smoothed line, we can see the model tends to estimate ratings most accurately closest to the intersection of the overall rating mean of `r overall_mean`.  The model overestimates ratings below the average, and underestimates above it.
+
+# Conclusion
+
+10 Million ratings were analyzed from the MovieLens 10M dataset, and  bias factors were applied to account for the effects unique to individual users and movies. We regularized those effects to shrink smaller sample sizes towards the global average, and finally limited the resulting values to a range beween 0.5 and 5. 
+
+The final RMSE achieved in the model was:
+
+```{r echo=FALSE}
+rmse_results <- tibble(Method = "Final RMSE", RMSE = regularized_effects_limits) 
+rmse_results %>% niceKable
+```
+
+This is better than the target of 0.87750.
+
+\newpage
+
+## Future Considerations
+
+The model may be improved in the future by adjusting or changing the modeling approach altogether. Below are some of these opportunities that were not included in the final model. Some opportunities are mutually exclusive, as they would rely on entirely different methodologies.
+
+### Matrix Factorization
+
+We could consider using matrix factorization to build a model. 
+
+We would create a matrix with movies in rows and users in columns (or vice versa), with the intersection being a given users's rating for a given film. Here is an example with the most commonly-rated films, with ratings given by the first 7 users.
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+topMovies <- edx %>% group_by(movieId) %>% summarise(n = n()) %>% arrange(desc(n)) %>% top_n(11) 
+
+topMoviesRatings <- edx %>% filter(movieId %in% topMovies$movieId) %>% group_by(userId) %>% summarise(n = n()) %>%   slice(1:6)  #top_n(11) before the slice would give us the most prolific raters
+
+matrix <- edx %>% filter(movieId %in% topMovies$movieId, userId %in% topMoviesRatings$userId)  %>% select(-timestamp, -genres)
+
+acast(matrix, title~userId, value.var="rating") %>% niceKable
+```
+
+Since each user doesn't rate every film, this is what's known as a 'sparse' matrix, with many *"NA"* values.
+
+### Rounding
+
+We could perhaps further improve the performance of the model by rounding our predictions to the nearest integer, only when predicting ratings from 2003 and earlier.
+
+### Genre Effects
+A future model may be improved by considering genre effects, especially user+genre effects. 
+
+To achive this, we could use *one-hot encoding* to transform our pipe separated "blob" of genres into individual boolean columns that indicate whether a film falls into that genre.
+
+This would permit us to calculate genre biases (dramas tend to be more highly rated than comedies).  A more advanced application could perhaps consider user-genre biases, accounting for the fact that certain users prefer certain genres.
+
+```{r echo=FALSE}
+
+#Split genres into a dummy variable and one-hot encode them
+
+sample <- edx[1:5,]
+
+genre_split <- cSplit_e(sample, "genres", "|", type="character", fill = 0, drop = TRUE)
+genre_split %>% select(-(1:4)) %>% select(1:4) %>% niceKable()
+
+```
+
+### Rating Delay
+
+Movies that are rated shortly after they were released seem to have a different bias than movies that were rated long after they were released. In our correlation plot, we observed that `review_delay` was positively correlated with `rating`.
+
+There are many causal factors (e.g. nostalgia, recency bias, selection bias, true decline in quality over time) that could explain this correlation so additional exploration would be needed to understand this relationship and its potential predictive utility.
+
+### Machine learning techniques
+
+Furthermore, to develop the final model, we didn't use any CPU or RAM-intensive machine learning models. For this author, such an undertaking proved infeasible due to technological limitations in handling the size of this dataset.
+
+
+# Citations
+
+F. Maxwell Harper and Joseph A. Konstan. 2015. The MovieLens Datasets: History and Context. ACM Transactions on Interactive Intelligent Systems (TiiS) 5, 4, Article 19 (December 2015), 19 pages. DOI=http://dx.doi.org/10.1145/2827872
+
+
